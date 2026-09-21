@@ -1,11 +1,12 @@
 import os
 import time
+import threading
 import requests
 from bs4 import BeautifulSoup
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 # ─── 【設定部分】 ───
 URL = "https://toreca-ace.com"
-# 安全対策：URLを直接書かず、サーバーの秘密のポケットから読み込むように変更
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 # ─────────────────────
 
@@ -20,7 +21,7 @@ def get_product_count():
         products = soup.find_all("a", string="詳しく見る")
         return len(products)
     except Exception as e:
-        print(f"数据取得エラー: {e}")
+        print(f"データ取得エラー: {e}")
         return None
 
 def check_website():
@@ -39,6 +40,12 @@ def check_website():
     if current_count != LAST_PRODUCT_COUNT:
         LAST_PRODUCT_COUNT = current_count
 
+# 1.分おきの監視をバックグラウンドで回す処理
+def monitor_loop():
+    while True:
+        check_website()
+        time.sleep(60)
+
 def send_discord_notification(message):
     data = {"content": message}
     try:
@@ -46,7 +53,18 @@ def send_discord_notification(message):
     except Exception as e:
         print(f"Discord通知エラー: {e}")
 
+# ─── 🚀 【Renderのエラーを消すための仮の窓口処理】 ───
+def run_dummy_server():
+    # 環境変数からポート（10000）を読み込み、仮のWEBサーバーを立ち上げてRenderを安心させる
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    print(f"Render対策用の仮サーバーをポート {port} で起動しました。")
+    server.serve_forever()
+
 if __name__ == "__main__":
-    while True:
-        check_website()
-        time.sleep(60)
+    # 見張りプログラムを裏側でスタート
+    t = threading.Thread(target=monitor_loop, daemon=True)
+    t.start()
+    
+    # メインで仮の窓口を起動してRenderに「ポート開いてるよ」とアピールする
+    run_dummy_server()
