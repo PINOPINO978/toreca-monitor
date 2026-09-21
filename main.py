@@ -65,6 +65,7 @@ if __name__ == "__main__":
     # 見張りプログラムを裏側でスタート
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
-    
+    send_discord_notification("✅ 【テスト通知】システムは正常に稼働しています！本番の自動監視を継続します。")
+
     # メインで仮の窓口を起動してRenderに「ポート開いてるよ」とアピールする
     run_dummy_server()
