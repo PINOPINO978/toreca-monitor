@@ -2,151 +2,81 @@ import os
 import time
 import threading
 import requests
-import hashlib
-import random
 from bs4 import BeautifulSoup
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 # ─── 【設定部分】 ───
-TARGET_URLS = [
-    "https://toreca-ace.com",
-    "https://toreca-ace.com",
-    "https://toreca-ace.com"
-]
+TARGET_SITES = {
+    "ポケカBOX一覧": "https://toreca-ace.com",
+    "ワンピースBOX一覧": "https://toreca-ace.com",
+    "遊戯王BOX一覧": "https://toreca-ace.com"
+}
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 # ─────────────────────
 
-LAST_PRODUCT_URLS = {url: set() for url in TARGET_URLS}
-LAST_AVAILABLE_URLS = {url: set() for url in TARGET_URLS}
-LAST_PAGE_HASH = {url: "" for url in TARGET_URLS}
-LAST_PRODUCT_DETAILS = {url: {} for url in TARGET_URLS}
+LAST_TEXTS = {name: "" for name in TARGET_SITES.keys()}
 
-def get_page_source(base_url):
+def get_page_text(url):
     try:
-        cache_buster = f"&t={random.randint(100000, 999999)}"
-        target_url = base_url + cache_buster
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "ja,jp;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache"
-        }
-        res = requests.get(target_url, headers=headers, timeout=15)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        res = requests.get(url, headers=headers, timeout=15)
         res.raise_for_status()
-        return res.text
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        main_content = soup.find("main")
+        if not main_content:
+            main_content = soup.find("body")
+            
+        return " ".join(main_content.get_text().split())
     except Exception as e:
-        print(f"ネットワーク取得エラー: {e}")
+        print(f"❌ データ取得エラー ({url}): {e}")
         return None
 
-def check_single_url(url, label):
-    global LAST_PRODUCT_URLS, LAST_AVAILABLE_URLS, LAST_PAGE_HASH, LAST_PRODUCT_DETAILS
+def check_websites():
+    global LAST_TEXTS
     
-    html_content = get_page_source(url)
-    if not html_content:
-        return
-
-    soup = BeautifulSoup(html_content, "html.parser")
-    
-    current_text = soup.get_text()
-    current_hash = hashlib.md5(current_text.encode('utf-8')).hexdigest()
-    
-    current_product_urls = set()
-    current_available_urls = set()
-    current_product_details = {}
-    
-    for item in soup.find_all("a", href=True):
-        href = item["href"]
-        if "/view/item/" in href:
-            full_url = f"https://toreca-ace.com{href}" if href.startswith("/") else href
-            current_product_urls.add(full_url)
+    for name, url in TARGET_SITES.items():
+        current_text = get_page_text(url)
+        
+        if not current_text:
+            print(f"⚠️ 【{name}】のページデータの取得に失敗したため、この回はスキップします。")
+            continue
             
-            item_text = item.get_text()
-            parent = item.parent
-            parent_text = parent.get_text() if parent else ""
-            combined_text = (item_text + parent_text).replace("\n", "").replace(" ", "")
+        # 初回起動時
+        if LAST_TEXTS[name] == "":
+            LAST_TEXTS[name] = current_text
+            print(f"🚀 【{name}】の文字書き換え監視をスタートしました。")
+            send_discord_notification(f"✅ 【監視スタート】{name} の文字監視（在庫復活チェック）を開始しました！\nURL: {url}")
+            continue
             
-            current_product_details[full_url] = combined_text
-            
-            if "在庫なし" in combined_text.upper() or "売り切れ" in combined_text.upper() or "SOLD" in combined_text.upper():
-                continue
-                
-            current_available_urls.add(full_url)
-
-    if not LAST_PAGE_HASH[url]:
-        LAST_PRODUCT_URLS[url] = current_product_urls
-        LAST_AVAILABLE_URLS[url] = current_available_urls
-        LAST_PRODUCT_DETAILS[url] = current_product_details
-        LAST_PAGE_HASH[url] = current_hash
-        print(f"【超精密監視開始: {label}】全 {len(current_product_urls)} 件、即購入可能: {len(current_available_urls)} 件", flush=True)
-        return
-
-    alert_triggered = False
-    reasons = []
-    alert_urls = set()
-    
-    if current_product_urls - LAST_PRODUCT_URLS[url]:
-        alert_triggered = True
-        reasons.append("📦 完全新規の商品URLが検索結果に追加されました！")
-        alert_urls.update(current_product_urls - LAST_PRODUCT_URLS[url])
-
-    if current_available_urls - LAST_AVAILABLE_URLS[url]:
-        alert_triggered = True
-        reasons.append("🔥 在庫切れだったBOXのカートボタンが復活しました！")
-        alert_urls.update(current_available_urls - LAST_AVAILABLE_URLS[url])
-
-    for p_url, p_text in current_product_details.items():
-        if p_url in LAST_PRODUCT_DETAILS[url] and p_text != LAST_PRODUCT_DETAILS[url][p_url]:
-            alert_triggered = True
-            reasons.append("⚡ 既存ページの内容・価格の書き換えを検知しました！")
-            alert_urls.add(p_url)
-
-    if current_hash != LAST_PAGE_HASH[url] and not alert_triggered:
-        alert_triggered = True
-        reasons.append("⚠️ 警告：ページ内の表示データ全体に変革を検知しました！")
-        alert_urls.add(url)
-
-    if alert_triggered:
-        print(f"💡 [{label}] で変更検知：{', '.join(reasons)}", flush=True)
-        for link in alert_urls:
+        # 1分前と比べてページ内の文字が書き換えられた場合（バグ修正済）
+        if current_text != LAST_TEXTS[name]:
             message = (
-                f"🚨 ── 【トレカエース・ゲリラ更新検知（{label}）】 ── 🚨\n"
-                f"理由: { ' / '.join(list(set(reasons))) }\n\n"
-                f"確認はこちら：\n👉 {link}"
+                f"🚨 【トレカエース】{name} のページが書き換えられました（入荷・在庫復活の可能性大）！\n"
+                f"売り切れ表示が消えてカートに入れられる状態になった可能性があります！\n"
+                f"大至急、ページを確認してください：\n{url}"
             )
             send_discord_notification(message)
-            
-        LAST_PRODUCT_URLS[url] = current_product_urls
-        LAST_AVAILABLE_URLS[url] = current_available_urls
-        LAST_PRODUCT_DETAILS[url] = current_product_details
-        LAST_PAGE_HASH[url] = current_hash
-    else:
-        LAST_PRODUCT_DETAILS[url] = current_product_details
-        LAST_PAGE_HASH[url] = current_hash
+            print(f"💡 【{name}】のページ書き換え（変更）を検知し、Discordへ通知を飛ばしました！")
+            LAST_TEXTS[name] = current_text
+        else:
+            print(f"⏰ 【定期チェック】{name}: 変化なし（ページ書き換えなし）")
 
 def monitor_loop():
-    labels = ["ポケモンカード", "遊戯王", "ワンピース"]
-    
-    # 🚀【新規追加】起動時に1回だけ、Discordへ「正しく繋がったよ」とテスト通知を送る
-    test_message = "✅ 【トレカエース監視システム】RenderとDiscordの連携に成功しました！24時間フル監視を開始します。"
-    send_discord_notification(test_message)
-    print("💡 Discordへテスト起動通知を送信しました。", flush=True)
-
     while True:
-        for url, label in zip(TARGET_URLS, labels):
-            check_single_url(url, label)
-            time.sleep(2)
-        time.sleep(50)
+        check_websites()
+        time.sleep(60)
 
 def send_discord_notification(message):
     if not DISCORD_WEBHOOK_URL:
-        print("Discord Webhook URLが未設定です。", flush=True)
+        print("❌ DiscordのWebhook URLが環境変数に設定されていません。")
         return
     data = {"content": message}
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
+        res = requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
+        print(f"📮 Discord送信ステータス: {res.status_code}")
     except Exception as e:
-        print(f"Discord通知エラー: {e}", flush=True)
+        print(f"❌ Discord通知エラー: {e}")
 
 def keep_alive_loop(port):
     time.sleep(20)
@@ -155,14 +85,15 @@ def keep_alive_loop(port):
             requests.get(f"http://127.0.0.1:{port}", timeout=5)
         except Exception:
             pass
-        time.sleep(210)
+        time.sleep(180)
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     ka_thread = threading.Thread(target=keep_alive_loop, args=(port,), daemon=True)
     ka_thread.start()
+    
     server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
-    print(f"Render用仮サーバー（ポート {port}）を起動しました。", flush=True)
+    print(f"💻 Render用ダミーサーバー起動（ポート: {port}）")
     server.serve_forever()
 
 if __name__ == "__main__":
