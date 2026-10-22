@@ -399,3 +399,90 @@ def check_single_target(target):
 
         for product_url in sorted(reappeared_urls):
   
+            product = current_products[product_url]
+            notifications.append(make_alert_message(
+                label,
+                "♻️ 商品の再入荷を検知しました",
+                product_url,
+                product.get("text", ""),
+            ))
+
+        for product_url in sorted(changed_urls):
+            product = current_products[product_url]
+            notifications.append(make_alert_message(
+                label,
+                "🔄 商品情報の変更を検知しました",
+                product_url,
+                product.get("text", ""),
+            ))
+
+        for message in notifications:
+            sent = send_discord_notification(message)
+            if sent:
+                log(f"[{label}] Discord通知を送信しました")
+            else:
+                log(f"[{label}] Discord通知に失敗しました")
+
+        with state_lock:
+            monitor_state[key] = {
+                "label": label,
+                "products": current_products,
+                "page_hash": page_hash,
+                "updated_at": time.time(),
+            }
+            save_state()
+
+        log(
+            f"[{label}] 監視完了。"
+            f"商品数={len(current_products)}、"
+            f"新規={len(added_urls)}、"
+            f"再入荷={len(reappeared_urls)}、"
+            f"変更={len(changed_urls)}"
+        )
+
+
+def monitor_loop():
+    log("トレカ監視を開始します")
+
+    while True:
+        try:
+            for target in TARGETS:
+                try:
+                    check_single_target(target)
+                except Exception as exc:
+                    log(f"監視エラー: {exc}")
+
+                time.sleep(2)
+
+        except Exception as exc:
+            log(f"監視ループエラー: {exc}")
+
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    log(f"ヘルスチェックサーバーを起動しました。port={port}")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True,
+    )
+    health_thread.start()
+
+    monitor_loop()
