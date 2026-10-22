@@ -398,91 +398,153 @@ def check_single_target(target):
             ))
 
         for product_url in sorted(reappeared_urls):
-  
             product = current_products[product_url]
+
             notifications.append(make_alert_message(
                 label,
-                "♻️ 商品の再入荷を検知しました",
+                "🔥 在庫切れ表示から購入可能表示への変化を検知しました"
+                "（表示文言ベース）",
                 product_url,
                 product.get("text", ""),
             ))
 
-        for product_url in sorted(changed_urls):
+        # 既存商品の表示内容が変わった場合
+        for product_url in sorted(
+            changed_urls - added_urls - reappeared_urls
+        ):
             product = current_products[product_url]
+
             notifications.append(make_alert_message(
                 label,
-                "🔄 商品情報の変更を検知しました",
+                "✏️ 既存商品カードの表示内容が変化しました"
+                "（価格・表示文言など）",
                 product_url,
                 product.get("text", ""),
             ))
+
+        if (
+            page_hash != previous.get("page_hash")
+            and not notifications
+        ):
+            log(
+                f"[{label}] ページ表示は変化しましたが、"
+                "商品単位の変化はありません"
+            )
+
+        # 正常取得を確認してから監視状態を更新
+        monitor_state[key] = {
+            "label": label,
+            "products": current_products,
+            "page_hash": page_hash,
+            "updated_at": time.time(),
+        }
+
+        save_state()
+
+    if notifications:
+        log(
+            f"[{label}] 変更検知: "
+            f"新規 {len(added_urls)} 件 / "
+            f"在庫復活 {len(reappeared_urls)} 件 / "
+            f"表示変更 "
+            f"{len(changed_urls - added_urls - reappeared_urls)} 件"
+        )
 
         for message in notifications:
-            sent = send_discord_notification(message)
-            if sent:
-                log(f"[{label}] Discord通知を送信しました")
-            else:
-                log(f"[{label}] Discord通知に失敗しました")
+            send_discord_notification(message)
+            time.sleep(0.5)
 
-        with state_lock:
-            monitor_state[key] = {
-                "label": label,
-                "products": current_products,
-                "page_hash": page_hash,
-                "updated_at": time.time(),
-            }
-            save_state()
-
-        log(
-            f"[{label}] 監視完了。"
-            f"商品数={len(current_products)}、"
-            f"新規={len(added_urls)}、"
-            f"再入荷={len(reappeared_urls)}、"
-            f"変更={len(changed_urls)}"
-        )
+    else:
+        log(f"[{label}] 商品単位の変更なし。")
 
 
 def monitor_loop():
-    log("トレカ監視を開始します")
+    log("トレカエース監視ループを開始します。")
+    load_state()
+
+    send_discord_notification(
+        "✅ **トレカエース監視システム起動**\n"
+        "ポケモンカード・ワンピース・遊戯王の"
+        "カテゴリ監視を開始しました。"
+    )
 
     while True:
-        try:
-            for target in TARGETS:
-                try:
-                    check_single_target(target)
-                except Exception as exc:
-                    log(f"監視エラー: {exc}")
+        cycle_start = time.time()
 
-                time.sleep(2)
+        for target in TARGETS:
+            try:
+                check_single_target(target)
 
-        except Exception as exc:
-            log(f"監視ループエラー: {exc}")
+            except Exception as exc:
+                log(
+                    f"[{target['label']}] "
+                    f"監視処理で予期しないエラー: {exc}"
+                )
 
-        time.sleep(CHECK_INTERVAL_SECONDS)
+                send_discord_notification(
+                    f"⚠️ **トレカエース監視エラー：{target['label']}**\n"
+                    f"エラー: {str(exc)[:500]}\n"
+                    f"カテゴリ: {target['url']}"
+                )
+
+            time.sleep(REQUEST_GAP_SECONDS)
+
+        elapsed = time.time() - cycle_start
+        sleep_seconds = max(
+            1,
+            CHECK_INTERVAL_SECONDS - elapsed
+        )
+
+        log(
+            f"監視1巡完了。所要 {elapsed:.1f} 秒。"
+            f"次の確認まで {sleep_seconds:.1f} 秒"
+        )
+
+        time.sleep(sleep_seconds)
 
 
-class HealthHandler(BaseHTTPRequestHandler):
+# ============================================================
+# Render用HTTPサーバー
+# ============================================================
+
+class HealthHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
+        if self.path in ("/", "/health"):
+            body = b"toreca monitor is running\n"
 
-    def log_message(self, format, *args):
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        else:
+            self.send_error(404)
+
+    def log_message(self, format_string, *args):
         return
 
 
-def start_health_server():
+def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
-    log(f"ヘルスチェックサーバーを起動しました。port={port}")
+
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
+
+    log(f"Render用ヘルスチェックサーバーを起動しました。PORT={port}")
     server.serve_forever()
 
 
 if __name__ == "__main__":
-    health_thread = threading.Thread(
-        target=start_health_server,
-        daemon=True,
+    monitor_thread = threading.Thread(
+        target=monitor_loop,
+        daemon=True
     )
-    health_thread.start()
+    monitor_thread.start()
 
-    monitor_loop()
+    run_http_server()
